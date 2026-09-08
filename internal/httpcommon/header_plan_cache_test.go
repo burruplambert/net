@@ -353,6 +353,37 @@ func TestReplayRejectsMismatches(t *testing.T) {
 	}
 }
 
+// TestPlanMRUReplaySubsets drives plan with inputs that are strict subsets of
+// the most recently used shape. The hash-free replay of that shape checks
+// membership and per-name counts, which a subset passes, so only plan's
+// length guards keep a subset off the cached resolution — where an order
+// subset redistributes multi-value slots and a missing trailing key would
+// still be emitted. The differential comparison proves each case was rebuilt.
+func TestPlanMRUReplaySubsets(t *testing.T) {
+	h := map[string][]string{
+		"Accept":  {"a", "b"},
+		"Cookie":  {"x=1"},
+		"X-Trail": {"t"},
+	}
+	order := []string{"accept", "cookie", "accept"}
+	c := NewHeaderPlanCache()
+	prime(t, c, order, h)
+
+	cases := []struct {
+		name  string
+		order []string
+		h     map[string][]string
+	}{
+		{"order subset", []string{"accept", "cookie"}, h},
+		{"key subset", order, map[string][]string{"Accept": {"a", "b"}, "Cookie": {"x=1"}}},
+	}
+	for _, tc := range cases {
+		want, orderedLen := planHeaderOrderRef(tc.order, tc.h)
+		got := clonePlan(c.plan(tc.order, tc.h))
+		comparePlans(t, tc.name, got, want, orderedLen)
+	}
+}
+
 // TestPlanCacheAdmission checks the double-miss rule: one call must not build
 // a shape, the second must, and an unrepeated shape must never be admitted.
 func TestPlanCacheAdmission(t *testing.T) {

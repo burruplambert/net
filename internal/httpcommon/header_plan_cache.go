@@ -117,6 +117,23 @@ type planScratch struct {
 // planHeaderOrder(order, h) would, serving the resolution metadata from the
 // cache when a verified shape matches and rebuilding it otherwise.
 func (c *HeaderPlanCache) plan(order []string, h map[string][]string) []plannedHeader {
+	// Replay the most recently used shape before hashing anything. Replay is
+	// the verification — the identity hash only ever selects a candidate, so
+	// a replay that succeeds never needed it, and a connection that settles
+	// on one shape stops paying the per-request hash of every order name and
+	// map key. The length guards are load-bearing: replay proves multiset
+	// equality only in combination with equal lengths (an order or key
+	// subset passes its membership and count checks), and on this path no
+	// identity has checked them.
+	if len(c.shapes) > 0 {
+		s := c.shapes[0]
+		if s.id.orderLen == len(order) && s.id.keyLen == len(h) {
+			if plan, ok := c.replay(s, order, h); ok {
+				c.hits++
+				return plan
+			}
+		}
+	}
 	if c.seed == (maphash.Seed{}) {
 		// A zero-value cache has no seed yet; hashing with one panics.
 		c.seed = maphash.MakeSeed()
