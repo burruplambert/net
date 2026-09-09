@@ -194,7 +194,7 @@ func (e *Encoder) WriteField(f HeaderField) error {
 // only name matches, i points to that index and nameValueMatch
 // becomes false.
 func (e *Encoder) searchTable(f HeaderField) (i uint64, nameValueMatch bool) {
-	i, nameValueMatch = staticTable.search(f)
+	i, nameValueMatch = staticSearch(f)
 	if nameValueMatch {
 		return i, true
 	}
