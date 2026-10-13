@@ -198,14 +198,17 @@ type Transport struct {
 	// WireCaseResponseHeaders, when true, keys a response's Header map by the
 	// field name exactly as the wire carried it instead of canonicalising it.
 	// HTTP/2 requires lowercase field names (RFC 9113 §8.2.1) and the framer
-	// rejects anything else, so the keys are the lowercase names, one string
-	// per field straight from HPACK with no per-name conversion or allocation.
+	// rejects anything else, so the keys are the lowercase names, straight
+	// from HPACK. That saves one allocation per field whose name is not in
+	// the common header table; common names were interned already.
 	//
-	// http.Header's accessors (Get, Values, Set, Del) canonicalise the name
-	// they are given and will not find these keys; a caller setting this reads
-	// and writes the map directly. Trailer maps keep canonical keys either
-	// way. Off by default, which preserves the canonical maps net/http
-	// callers expect.
+	// Everything that looks a header up by canonical name stops finding it:
+	// http.Header's Get, Values, Set and Del, Response.Cookies and
+	// Response.Location, and with them http.Client's redirect and cookie jar
+	// handling. The 1xx header maps passed to httptrace's Got1xxResponse are
+	// wire-case too. A caller setting this reads and writes the map directly.
+	// Trailer maps keep canonical keys either way. Off by default, which
+	// preserves the canonical maps net/http callers expect.
 	WireCaseResponseHeaders bool
 
 	// UserAgent specifies the default User-Agent header to send when the request
@@ -3055,7 +3058,7 @@ func (rl *clientConnReadLoop) handleResponse(cs *clientStream, f *MetaHeadersFra
 		if !wireCase {
 			key = httpcommon.CanonicalHeader(hf.Name)
 		}
-		if asciiEqualFold(hf.Name, "trailer") {
+		if hf.Name == "trailer" { // the framer has already rejected uppercase names
 			t := res.Trailer
 			if t == nil {
 				t = make(http.Header)
