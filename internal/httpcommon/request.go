@@ -163,6 +163,7 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 	if len(param.HeaderOrder) > 0 {
 		if param.PlanCache != nil {
 			orderPlan = param.PlanCache.plan(param.HeaderOrder, req.Header)
+			defer param.PlanCache.release()
 		} else {
 			orderPlan = planHeaderOrder(param.HeaderOrder, req.Header)
 		}
@@ -370,8 +371,10 @@ func EncodeHeaders(ctx context.Context, param EncodeHeadersParam, headerf func(n
 				// Skip writing invalid headers. Per RFC 7540, Section 8.1.2, header
 				// field names have to be ASCII characters (just as in HTTP/1.x).
 				// A name arriving with wireName set never trips this: it came off
-				// the order plan, and validateHeaders vetted every planned name
-				// above before the plan was built.
+				// the order plan, and every planned name is ASCII. validateHeaders
+				// vetted the real header names above; the ones it skips (the
+				// Header-Order: and PHeader-Order: keys and :protocol) are ASCII
+				// too, and processHeader drops the magic keys anyway.
 				return
 			}
 		}

@@ -18,8 +18,10 @@ func mustParseURL(s string) *url.URL {
 	return u
 }
 
-// planHeaderOrderRef is the pre-cache planHeaderOrder, kept verbatim as the
-// behavioural reference for the differential tests below. It additionally
+// planHeaderOrderRef is a copy of this change's uncached planner, kept as the
+// behavioural reference for the differential tests below. It is not the
+// per-pass loop the wire was validated against; that equivalence was checked
+// separately, by running both trees over the same seeded shapes. It additionally
 // reports how many plan entries came from order slots, because everything
 // after them trails in map iteration order and has to be compared as a set.
 func planHeaderOrderRef(order []string, h map[string][]string) (plan []plannedHeader, orderedLen int) {
@@ -251,8 +253,8 @@ func (s shapeCase) instance(rng *rand.Rand, round int) []string {
 
 // TestPlanCacheDifferential drives one cache through interleaved randomized
 // shapes, fresh permutations and mutated values per round, comparing every
-// plan (cached path and plain path) against the verbatim pre-cache
-// implementation, across several seeds. Shapes mutate mid-stream so the
+// plan (cached path and plain path) against the reference planner, across
+// several seeds. Shapes mutate mid-stream so the
 // invalidation path runs too.
 func TestPlanCacheDifferential(t *testing.T) {
 	for seed := int64(1); seed <= 8; seed++ {
@@ -266,8 +268,8 @@ func TestPlanCacheDifferential(t *testing.T) {
 			for round := 0; round < 200; round++ {
 				si := rng.Intn(len(shapes))
 				if rng.Intn(25) == 0 {
-					// Mutate the shape in place: the cache must notice and
-					// rebuild rather than serve the stale resolution.
+					// Swap in a fresh shape at this slot: the cache must notice
+					// and rebuild rather than serve the stale resolution.
 					shapes[si] = genShape(rng)
 				}
 				s := shapes[si]
@@ -356,7 +358,7 @@ func TestReplayRejectsMismatches(t *testing.T) {
 // TestPlanMRUReplaySubsets drives plan with inputs that are strict subsets of
 // the most recently used shape. The hash-free replay of that shape checks
 // membership and per-name counts, which a subset passes, so only plan's
-// length guards keep a subset off the cached resolution — where an order
+// length guards keep a subset off the cached resolution, where an order
 // subset redistributes multi-value slots and a missing trailing key would
 // still be emitted. The differential comparison proves each case was rebuilt.
 func TestPlanMRUReplaySubsets(t *testing.T) {
@@ -410,8 +412,8 @@ func TestPlanCacheAdmission(t *testing.T) {
 // TestPlanCacheThroughEncodeHeaders runs the cache through the public entry
 // point against the uncached output, over repeated permutations of the
 // production-like benchmark shape, so the emitted wire sequence is compared
-// end to end, cookie splitting, content-length and user-agent handling
-// included.
+// end to end, content-length and user-agent handling included. testParam
+// disables cookie splitting, so the split path is not exercised here.
 func TestPlanCacheThroughEncodeHeaders(t *testing.T) {
 	rng := rand.New(rand.NewSource(42))
 	c := NewHeaderPlanCache()

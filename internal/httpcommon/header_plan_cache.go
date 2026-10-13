@@ -118,7 +118,7 @@ type planScratch struct {
 // cache when a verified shape matches and rebuilding it otherwise.
 func (c *HeaderPlanCache) plan(order []string, h map[string][]string) []plannedHeader {
 	// Replay the most recently used shape before hashing anything. Replay is
-	// the verification — the identity hash only ever selects a candidate, so
+	// the verification: the identity hash only ever selects a candidate, so
 	// a replay that succeeds never needed it, and a connection that settles
 	// on one shape stops paying the per-request hash of every order name and
 	// map key. The length guards are load-bearing: replay proves multiset
@@ -154,6 +154,24 @@ func (c *HeaderPlanCache) plan(order []string, h map[string][]string) []plannedH
 		c.insert(c.buildShape(order, id))
 	}
 	return plan
+}
+
+// release drops the scratch's references to the request's header values
+// once encoding is done. The scratch outlives the request, and without this
+// an idle connection kept the last request's values, Authorization and
+// cookies among them, reachable until its next request or its close. The
+// whole capacity is cleared, since shorter later requests leave old entries
+// past their length.
+func (c *HeaderPlanCache) release() {
+	plan := c.scratch.plan[:cap(c.scratch.plan)]
+	for i := range plan {
+		plan[i].values = nil
+	}
+	entries := c.scratch.entries[:cap(c.scratch.entries)]
+	for i := range entries {
+		entries[i].values = nil
+	}
+	clear(c.scratch.vals[:cap(c.scratch.vals)])
 }
 
 // identity hashes the order-name multiset and the map key set with the
