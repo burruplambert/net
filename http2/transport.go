@@ -687,6 +687,15 @@ type clientStream struct {
 	sentEndStream bool // sent an END_STREAM flag to the peer
 	sentHeaders   bool
 
+	// endStreamSent mirrors sentEndStream for readers on other goroutines,
+	// and bodyDone records that Read consumed the declared Content-Length in
+	// full. Together they let Close tell a finished response from an early
+	// close; see transportResponseBody.Close.
+	endStreamSent atomic.Bool
+	bodyDone      atomic.Bool
+	lingerTimer   *time.Timer   // guarded by cc.mu; see lingerForEndStream
+	lingerc       chan struct{} // closed when the stream starts lingering
+
 	// owned by clientConnReadLoop:
 	firstByte       bool  // got the first response byte
 	pastHeaders     bool  // got first MetaHeadersFrame (actual headers)
@@ -708,6 +717,37 @@ func (cs *clientStream) get1xxTraceFunc() func(int, textproto.MIMEHeader) error 
 		return fn
 	}
 	return traceGot1xxResponseFunc(cs.trace)
+}
+
+// endStreamLinger bounds how long a finished response waits for the peer's
+// END_STREAM before the stream is reset after all, so a peer that never sends
+// it cannot hold a stream slot for the life of the connection.
+var endStreamLinger = 10 * time.Second
+
+// lingering reports whether the stream's body was closed after a complete
+// read and is waiting for the peer's END_STREAM.
+func lingering(cs *clientStream) bool {
+	select {
+	case <-cs.lingerc:
+		return true
+	default:
+		return false
+	}
+}
+
+// lingerForEndStream arms the fallback reset for a closed, fully read
+// response. When END_STREAM arrives first, the stream ends cleanly and
+// cleanupWriteRequest stops the timer.
+func (cs *clientStream) lingerForEndStream() {
+	cc := cs.cc
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+	if cs.lingerTimer == nil {
+		cs.lingerTimer = time.AfterFunc(endStreamLinger, func() {
+			cs.abortStream(errClosedResponseBody)
+		})
+		close(cs.lingerc)
+	}
 }
 
 func (cs *clientStream) abortStream(err error) {
@@ -1744,6 +1784,7 @@ func (cc *ClientConn) roundTrip(req *http.Request, streamf func(*clientStream)) 
 		abort:                make(chan struct{}),
 		respHeaderRecv:       make(chan struct{}),
 		donec:                make(chan struct{}),
+		lingerc:              make(chan struct{}),
 	}
 
 	cs.requestedGzip = httpcommon.IsRequestGzip(req.Method, req.Header, cc.t.disableCompression())
@@ -1934,6 +1975,7 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 	hasBody := cs.reqBodyContentLength != 0
 	if !hasBody {
 		cs.sentEndStream = true
+		cs.endStreamSent.Store(true)
 	} else {
 		if continueTimeout != 0 {
 			traceWait100Continue(cs.trace)
@@ -1964,6 +2006,7 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 			}
 		} else {
 			cs.sentEndStream = true
+			cs.endStreamSent.Store(true)
 		}
 	}
 
@@ -1980,6 +2023,7 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 	// Wait until the peer half-closes its end of the stream,
 	// or until the request is aborted (via context, error, or otherwise),
 	// whichever comes first.
+	ctxDone, reqCancel, lingerc := ctx.Done(), cs.reqCancel, cs.lingerc
 	for {
 		select {
 		case <-cs.peerClosed:
@@ -1991,9 +2035,26 @@ func (cs *clientStream) writeRequest(req *http.Request, streamf func(*clientStre
 			respHeaderTimer = nil // keep waiting for END_STREAM
 		case <-cs.abort:
 			return cs.abortErr
-		case <-ctx.Done():
+		case <-lingerc:
+			// The caller has the whole response and has closed it; only the
+			// peer's END_STREAM is outstanding. Callers commonly cancel the
+			// request context as soon as they return, which would reset the
+			// finished stream after all. From here only END_STREAM or the
+			// linger timer (through abort) end it.
+			ctxDone, reqCancel, lingerc = nil, nil, nil
+		case <-ctxDone:
+			// select picks at random among ready cases, so a cancel that
+			// lands after the body was closed can win over lingerc here.
+			if lingering(cs) {
+				ctxDone, reqCancel, lingerc = nil, nil, nil
+				continue
+			}
 			return ctx.Err()
-		case <-cs.reqCancel:
+		case <-reqCancel:
+			if lingering(cs) {
+				ctxDone, reqCancel, lingerc = nil, nil, nil
+				continue
+			}
 			return errRequestCanceled
 		}
 	}
@@ -2060,6 +2121,12 @@ func (cs *clientStream) encodeAndWriteHeaders(req *http.Request) error {
 	// time on a full send buffer, and deciding afterwards would let a slow
 	// write manufacture the idleness that triggers the ping.
 	pingNow := time.Now()
+	if endStream {
+		// Before the write, not after it returns: on a fast peer the whole
+		// response can arrive and the body be closed before the writer gets
+		// back here, and Close needs to see that our side is done.
+		cs.endStreamSent.Store(true)
+	}
 	err = cc.writeHeaders(cs.ID, endStream, int(cc.maxFrameSize), hdrs, priority)
 	traceWroteHeaders(cs.trace)
 
@@ -2134,6 +2201,9 @@ func (cs *clientStream) cleanupWriteRequest(err error) {
 		cs.reqBodyClosed = make(chan struct{})
 	}
 	bodyClosed := cs.reqBodyClosed
+	if cs.lingerTimer != nil {
+		cs.lingerTimer.Stop()
+	}
 	closeOnIdle := cc.singleUse || cc.doNotReuse || cc.t.disableKeepAlives() || cc.goAway != nil
 	// Have we read any frames from the connection since sending this request?
 	readSinceStream := cc.readBeforeStreamID > cs.ID
@@ -2430,6 +2500,9 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 			if len(data) > 0 {
 				cc.maybeWritePrefacePingLocked(time.Now())
 			}
+			if sentEnd {
+				cs.endStreamSent.Store(true) // see encodeAndWriteHeaders
+			}
 			err = cc.fr.WriteData(cs.ID, sentEnd, data)
 			if err == nil {
 				// TODO(bradfitz): this flush is for latency, not bandwidth.
@@ -2477,6 +2550,7 @@ func (cs *clientStream) writeRequestBody(req *http.Request) (err error) {
 
 	// Two ways to send END_STREAM: either with trailers, or
 	// with an empty DATA frame.
+	cs.endStreamSent.Store(true) // see encodeAndWriteHeaders
 	if len(trls) > 0 {
 		// Trailers never carry RFC 7540 PRIORITY data.
 		err = cc.writeHeaders(cs.ID, true, maxFrameSize, trls, nil)
@@ -3103,6 +3177,9 @@ func (b transportResponseBody) Read(p []byte) (n int, err error) {
 			return int(cs.bytesRemain), err
 		}
 		cs.bytesRemain -= int64(n)
+		if cs.bytesRemain == 0 {
+			cs.bodyDone.Store(true)
+		}
 		if err == io.EOF && cs.bytesRemain > 0 {
 			err = io.ErrUnexpectedEOF
 			cs.readErr = err
@@ -3165,6 +3242,20 @@ var errClosedResponseBody = errors.New("http2: response body closed")
 func (b transportResponseBody) Close() error {
 	cs := b.cs
 	cc := cs.cc
+
+	// A response whose declared length has been read in full, with nothing
+	// left buffered and our own END_STREAM already sent, is finished except
+	// for the peer's END_STREAM, which servers commonly send a moment later in
+	// an empty DATA frame. Aborting here raced that frame and usually won,
+	// sending RST_STREAM(CANCEL) on a request that had succeeded (#117).
+	// Chromium never does: it does not treat a response as complete until
+	// END_STREAM arrives. So leave the stream for the read loop to retire, and
+	// return without waiting for it.
+	if cs.bodyDone.Load() && cs.endStreamSent.Load() && cs.bufPipe.Len() == 0 {
+		cs.bufPipe.BreakWithError(errClosedResponseBody)
+		cs.lingerForEndStream()
+		return nil
+	}
 
 	cs.bufPipe.BreakWithError(errClosedResponseBody)
 	cs.abortStream(errClosedResponseBody)
