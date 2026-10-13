@@ -696,6 +696,11 @@ type clientStream struct {
 	lingerTimer   *time.Timer   // guarded by cc.mu; see lingerForEndStream
 	lingerc       chan struct{} // closed when the stream starts lingering
 
+	// headersEndedStream is set when the response HEADERS frame carried
+	// END_STREAM. The read loop writes it before closing respHeaderRecv, so
+	// roundTrip may read it once that channel is closed.
+	headersEndedStream bool
+
 	// owned by clientConnReadLoop:
 	firstByte       bool  // got the first response byte
 	pastHeaders     bool  // got first MetaHeadersFrame (actual headers)
@@ -1824,6 +1829,20 @@ func (cc *ClientConn) roundTrip(req *http.Request, streamf func(*clientStream)) 
 			// RoundTrip returns.
 			if err := waitDone(); err != nil {
 				return nil, err
+			}
+		}
+		if cs.headersEndedStream {
+			// The response ended with its HEADERS frame, and the read loop
+			// closes peerClosed just after waking us. Wait for that. A
+			// caller that cancels its context the moment we return would
+			// otherwise race writeRequest, which can see the cancel before
+			// peerClosed and reset a stream both sides have already closed.
+			// The wait above covers requests without a body; this covers the
+			// rest. No browser sends RST_STREAM on a finished stream.
+			select {
+			case <-cs.peerClosed:
+			case <-cs.abort:
+			case <-ctx.Done():
 			}
 		}
 		return res, nil
@@ -2958,6 +2977,9 @@ func (rl *clientConnReadLoop) processHeaders(f *MetaHeadersFrame) error {
 	}
 	cs.resTrailer = &res.Trailer
 	cs.res = res
+	if f.StreamEnded() {
+		cs.headersEndedStream = true
+	}
 	close(cs.respHeaderRecv)
 	if f.StreamEnded() {
 		rl.endStream(cs)
