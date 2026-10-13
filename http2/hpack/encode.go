@@ -166,7 +166,10 @@ func (e *Encoder) WriteField(f HeaderField) error {
 	if nameValueMatch && !suppressExactMatch {
 		e.buf = appendIndexed(e.buf, idx)
 	} else {
-		indexing := forceIncremental || e.shouldIndex(f)
+		// A sensitive field never goes in the table, whatever was pinned: it
+		// goes out as never-indexed, which the peer does not add, so adding it
+		// here would leave the two tables disagreeing from then on.
+		indexing := (forceIncremental && !f.Sensitive) || e.shouldIndex(f)
 		if suppressExactMatch {
 			indexing = false // 6.2.2 does not add to the dynamic table
 		}
