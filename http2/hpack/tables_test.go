@@ -298,7 +298,7 @@ func TestStaticTable(t *testing.T) {
 // TestStaticSearchMatchesGenericSearch pins staticSearch to the generic
 // headerFieldTable.search over the static table: the same index and the same
 // exact-match verdict for every probe, so the encoder's specialized static
-// lookup can never drift from the generated table semantics — the
+// lookup can never drift from the generated table semantics: the
 // first-entry name preference and the empty-valued exact matches included.
 func TestStaticSearchMatchesGenericSearch(t *testing.T) {
 	values := []string{"", "GET", "POST", "/", "/index.html", "http", "https",

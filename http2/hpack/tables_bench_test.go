@@ -76,7 +76,7 @@ func BenchmarkEncoderTableChurn(b *testing.B) {
 
 // requestFields is a request-shaped header list: pseudo-headers that
 // exact-match the static table, common names whose values the static table
-// does not hold — several hundred bytes of cookie among them — and one
+// does not hold (several hundred bytes of cookie among them) and one
 // per-request unique field. The shape every browser and API client sends.
 func requestFields(i int) []HeaderField {
 	return []HeaderField{
