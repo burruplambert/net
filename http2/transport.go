@@ -176,6 +176,16 @@ type Transport struct {
 	// request inside the callback.
 	HeaderPriorityFunc func(req *http.Request) *PriorityParam
 
+	// ChainStreamDependencies makes each new stream depend exclusively on
+	// the most recently opened stream that is still open at the same or a
+	// higher priority, which is how Chromium builds its dependency tree
+	// (net/spdy/http2_priority_dependencies.cc). Without it every HEADERS
+	// frame names stream 0 as its parent, which no Chromium build does once
+	// two streams overlap on a connection. The priority of a stream is read
+	// back from the weight its PriorityParam carries, so it only means
+	// anything with Chromium's weights. See priority_deps.go.
+	ChainStreamDependencies bool
+
 	// HeaderOrder specifies the order in which regular headers should be sent.
 	// If nil, headers are sent in the order they appear in the request.
 	HeaderOrder []string
@@ -521,6 +531,7 @@ func (t *Transport) initConnPool() {
 // HTTP/2 server.
 type ClientConn struct {
 	t            *Transport
+	deps         streamDeps           // ChainStreamDependencies bookkeeping; own lock
 	tconn        net.Conn             // usually *tls.Conn, except specialized impls
 	tlsState     *tls.ConnectionState // nil only for specialized impls
 	atomicReused uint32               // whether conn is being reused; atomic
@@ -706,6 +717,7 @@ func (cs *clientStream) abortStream(err error) {
 }
 
 func (cs *clientStream) abortStreamLocked(err error) {
+	cs.cc.deps.close(cs.ID)
 	cs.abortOnce.Do(func() {
 		cs.abortErr = err
 		close(cs.abort)
@@ -2032,6 +2044,13 @@ func (cs *clientStream) encodeAndWriteHeaders(req *http.Request) error {
 	if priority == nil {
 		priority = cc.t.HeaderPriority
 	}
+	if priority != nil && cc.t.ChainStreamDependencies {
+		// A copy: HeaderPriority is shared by every stream on every
+		// connection, and the parent is per stream.
+		p := *priority
+		p.StreamDep = cc.deps.open(cs.ID, p.Weight)
+		priority = &p
+	}
 
 	// Write the request.
 	endStream := !res.HasBody && !res.HasTrailers
@@ -2576,6 +2595,7 @@ func (cc *ClientConn) addStreamLocked(cs *clientStream) {
 }
 
 func (cc *ClientConn) forgetStreamID(id uint32) {
+	cc.deps.close(id)
 	cc.mu.Lock()
 	slen := len(cc.streams)
 	delete(cc.streams, id)
@@ -3304,6 +3324,10 @@ func (rl *clientConnReadLoop) endStream(cs *clientStream) {
 	// server.go's (*stream).endStream method.
 	if !cs.readClosed {
 		cs.readClosed = true
+		// The response is complete, so the stream leaves the dependency list
+		// now, as Chromium's does when it destroys the stream, and not when
+		// cleanup gets round to it after the caller has already moved on.
+		rl.cc.deps.close(cs.ID)
 		// Close cs.bufPipe and cs.peerClosed with cc.mu held to avoid a
 		// race condition: The caller can read io.EOF from Response.Body
 		// and close the body before we close cs.peerClosed, causing
