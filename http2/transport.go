@@ -549,7 +549,7 @@ type ClientConn struct {
 	readerDone chan struct{} // closed on error
 	readerErr  error         // set before readerDone is closed
 
-	reqWorkers requestWorkers // reusable doRequest goroutines; workers exit when readerDone closes
+	reqWorkers requestWorkers // reusable doRequest goroutines; idle ones expire, and all exit when readerDone closes
 
 	idleTimeout time.Duration // or 0 for never
 	idleTimer   *time.Timer
