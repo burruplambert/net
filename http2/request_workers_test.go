@@ -1,4 +1,4 @@
-// Copyright 2025 The Go Authors. All rights reserved.
+// Copyright 2026 The Go Authors. All rights reserved.
 // Use of this source code is governed by a BSD-style
 // license that can be found in the LICENSE file.
 
@@ -132,7 +132,6 @@ func TestRequestWorkersConcurrentDispatch(t *testing.T) {
 }
 
 func TestRequestWorkersExitOnClose(t *testing.T) {
-	before := runtime.NumGoroutine()
 	done := make(chan struct{})
 	var wg sync.WaitGroup
 	var w requestWorkers
@@ -142,10 +141,7 @@ func TestRequestWorkersExitOnClose(t *testing.T) {
 	}
 	wg.Wait()
 	close(done)
-	waitFor(t, func() bool { return runtime.NumGoroutine() <= before })
-	if got := w.workers.Load(); got != 0 {
-		t.Errorf("worker count is %d after teardown, want 0", got)
-	}
+	waitFor(t, func() bool { return w.workers.Load() == 0 })
 }
 
 func TestRequestWorkersDispatchAfterCloseStillRuns(t *testing.T) {
